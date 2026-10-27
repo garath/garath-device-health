@@ -1,0 +1,13 @@
+{
+  "domain": "garath_device_health",
+  "name": "Garath Device Health",
+  "version": "0.1.0",
+  "codeowners": ["@Garath"],
+  "config_flow": true,
+  "dependencies": ["repairs"],
+  "after_dependencies": ["zha", "zwave_js"],
+  "documentation": "https://github.com/Garath/garath-device-health",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "requirements": []
+}

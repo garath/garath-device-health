@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "garath-device-health"
+version = "0.1.0"
+description = "Opt-out Z-Wave JS and ZHA diagnostic and last-seen repairs for Home Assistant"
+requires-python = ">=3.14.2"
+authors = [{ name = "Garath" }]
+
+[project.optional-dependencies]
+dev = [
+    "homeassistant==2026.10.4",
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "pyright>=1.1",
+    "ruff>=0.11",
+    "zwave-js-server-python==0.73.1",
+    "zha==2.3.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["custom_components*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"custom_components.garath_device_health" = ["*.json", "translations/*.json"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pyright]
+include = ["custom_components"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
