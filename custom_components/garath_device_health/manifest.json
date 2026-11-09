@@ -1,7 +1,7 @@
 {
   "domain": "garath_device_health",
   "name": "Garath Device Health",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "codeowners": ["@Garath"],
   "config_flow": true,
   "dependencies": ["repairs"],
