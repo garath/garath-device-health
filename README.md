@@ -33,7 +33,9 @@ writes manufacturer-specific parameters. Enabled diagnostic entities may add
 Recorder history.
 
 The independent communication-age repair warns at **24 hours or more**, and
-clears when communication resumes. There are no pings, wake-ups, or polls of
+clears when communication resumes. Its warning and repair dialog show the last
+observed communication in Home Assistant's local time zone and the elapsed
+days, hours, and minutes, refreshed on each scan. There are no pings, wake-ups, or polls of
 physical devices. Checks run every five minutes and after device/entity registry
 changes, with a five-minute startup grace period. Detection can therefore lag
 the 24-hour boundary by up to one scan interval.

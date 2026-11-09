@@ -44,6 +44,7 @@ class Finding:
     device_id: str
     device_name: str
     details: str
+    last_seen: datetime | None = None
 
 
 def issue_id(kind: str, device_id: str) -> str:

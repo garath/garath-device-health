@@ -1,7 +1,8 @@
 """Exercise reconciliation, persistence and confirmation with real HA registries."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.components.repairs import RepairsFlowManager
@@ -50,6 +51,47 @@ def findings(hass):
         for issue in ir.async_get(hass).issues.values()
         if issue.domain == DOMAIN
     }
+
+
+async def test_stale_display_uses_local_contact_and_elapsed_time(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    # Elapsed time spans the daylight-saving transition and stays UTC-based.
+    contact = datetime(2026, 11, 1, 8, 30, tzinfo=UTC)
+    now = contact + timedelta(days=2, hours=3, minutes=14, seconds=59)
+    monitor.started_at = now - timedelta(minutes=6)
+    local_zone = ZoneInfo("America/Los_Angeles")
+    with (
+        patch.object(dt_util, "DEFAULT_TIME_ZONE", local_zone),
+        patch.dict(
+            "custom_components.garath_device_health.monitor.COLLECTORS",
+            {"zha": lambda _, feature: [observation(last_seen=contact)]},
+            clear=True,
+        ),
+    ):
+        monitor.async_scan(now)
+        placeholders = findings(hass)["stale_device-one"].translation_placeholders
+        assert placeholders["last_observed"] == contact.astimezone(local_zone).strftime(
+            "%x %X %Z"
+        )
+        assert placeholders["last_observed"].endswith("PDT")
+        assert (
+            placeholders["days"],
+            placeholders["hours"],
+            placeholders["minutes"],
+        ) == ("2", "3", "14")
+        flow = repairs.CommunicationRepairFlow("stale_device-one")
+        flow.hass = hass
+        result = await flow.async_step_confirm()
+        assert (
+            result["description_placeholders"]["last_observed"]
+            == placeholders["last_observed"]
+        )
+        monitor.async_scan(now + timedelta(minutes=1))
+        assert (
+            findings(hass)["stale_device-one"].translation_placeholders["minutes"]
+            == "15"
+        )
 
 
 async def test_stale_recovery_and_new_devices(hass, entry):

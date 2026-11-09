@@ -74,6 +74,7 @@ def evaluate_communication(
                     device.device_id,
                     device.name,
                     device.last_seen.isoformat(),
+                    last_seen=device.last_seen,
                 )
             )
     return findings

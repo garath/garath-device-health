@@ -53,9 +53,9 @@
     "communication_action": {
       "options": {
         "exclude": "Stop communication monitoring for this device",
-        "snooze_day": "Snooze the no-contact warning for 24 hours",
-        "snooze_week": "Snooze the no-contact warning for 7 days",
-        "snooze_30_days": "Snooze the no-contact warning for 30 days"
+        "snooze_day": "Snooze for 24 hours",
+        "snooze_week": "Snooze for 7 days",
+        "snooze_30_days": "Snooze for 30 days"
       }
     }
   },
@@ -67,7 +67,7 @@
         "step": {
           "confirm": {
             "title": "Diagnostic configuration for {device}",
-            "description": "Enable: {details}.\n\nThis only enables Home Assistant entities. It does not change device parameters, configure reporting, or send pings. Enabling entities can increase Recorder history. Alternatively, stop configuration checks for this device. Neither choice changes communication monitoring. Ignoring this repair also stops only configuration checks; closing this dialog changes nothing.\n\n{error_details}",
+            "description": "Enable: {details}.\n\n{error_details}",
             "data": {
               "action": "Configuration action"
             }
@@ -96,12 +96,12 @@
     },
     "stale": {
       "title": "Communication monitoring: no contact with {device} in 24 hours",
-      "description": "Last observed communication (UTC): {details}.\n\nCheck power, batteries, range, and the owning integration. Some healthy battery devices communicate less frequently than daily. Open this repair to snooze the no-contact warning for 24 hours, 7 days, or 30 days, or stop communication monitoring for this device. It clears automatically when communication resumes and does not ping or wake devices. Ignoring this repair stops only communication monitoring. Configuration checks are unaffected.",
+      "description": "**Last observed communication**\n{last_observed}\n\n**Time since**\n{days} days, {hours} hours, {minutes} minutes",
       "fix_flow": {
         "step": {
           "confirm": {
             "title": "Communication monitoring for {device}",
-            "description": "Last observed communication (UTC): {details}.\n\nSnooze this warning for 24 hours, 7 days, or 30 days without changing the last-contact time. Snoozes survive restarts and can be ended early in communication monitoring options. When a snooze expires, the next scan warns again only if communication is still overdue.\n\nStopping communication monitoring permanently, or using Home Assistant's Ignore action, affects only this feature. Diagnostic configuration checks are unaffected. Closing this dialog changes nothing.\n\n{error_details}",
+            "description": "**Last observed communication**\n{last_observed}\n\n**Time since**\n{days} days, {hours} hours, {minutes} minutes\n\n{error_details}",
             "data": {
               "action": "Communication action"
             }

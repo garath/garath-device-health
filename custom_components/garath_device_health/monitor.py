@@ -244,6 +244,22 @@ class DeviceHealthMonitor:
                 if finding.kind == "stale" and finding.device_id in active_snoozes:
                     continue
                 wanted.add(finding.issue_id)
+                placeholders = {
+                    "device": finding.device_name,
+                    "details": finding.details,
+                }
+                if finding.last_seen is not None:
+                    local_contact = dt_util.as_local(finding.last_seen)
+                    days, remainder = divmod(
+                        int((now - finding.last_seen).total_seconds()), 86400
+                    )
+                    hours, remainder = divmod(remainder, 3600)
+                    placeholders.update(
+                        last_observed=local_contact.strftime("%x %X %Z"),
+                        days=str(days),
+                        hours=str(hours),
+                        minutes=str(remainder // 60),
+                    )
                 ir.async_create_issue(
                     self.hass,
                     DOMAIN,
@@ -252,10 +268,7 @@ class DeviceHealthMonitor:
                     is_persistent=True,
                     severity=ir.IssueSeverity.WARNING,
                     translation_key=finding.kind,
-                    translation_placeholders={
-                        "device": finding.device_name,
-                        "details": finding.details,
-                    },
+                    translation_placeholders=placeholders,
                     data={
                         "device_id": finding.device_id,
                         "protocol": protocol,
