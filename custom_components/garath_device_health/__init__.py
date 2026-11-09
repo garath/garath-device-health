@@ -15,10 +15,24 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import CONF_EXCLUDED_DEVICES, DOMAIN, SCAN_INTERVAL, Feature
 from .monitor import DeviceHealthMonitor
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Preserve old all-check exclusions when introducing separate features."""
+    if entry.version > 2:
+        return False
+    if entry.version == 1:
+        options = dict(entry.options)
+        legacy_excluded = options.pop(CONF_EXCLUDED_DEVICES, [])
+        for feature in Feature:
+            options.setdefault(feature.excluded_key, list(legacy_excluded))
+            options.setdefault(feature.enabled_key, True)
+        hass.config_entries.async_update_entry(entry, options=options, version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -67,7 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply exclusions and snoozes without reloading protocol integrations."""
+    """Apply feature settings without reloading protocol integrations."""
     if (monitor := hass.data.get(DOMAIN)) is not None:
         monitor.async_scan()
 

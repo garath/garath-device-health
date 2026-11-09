@@ -13,9 +13,9 @@ from homeassistant.util import dt as dt_util
 from custom_components.garath_device_health import repairs
 from custom_components.garath_device_health.adapters import SourceUnavailable
 from custom_components.garath_device_health.const import (
-    CONF_EXCLUDED_DEVICES,
     CONF_SNOOZED_UNTIL,
     DOMAIN,
+    Feature,
 )
 from custom_components.garath_device_health.models import (
     Diagnostic,
@@ -57,7 +57,7 @@ async def test_stale_recovery_and_new_devices(hass, entry):
     monitor = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
@@ -67,21 +67,22 @@ async def test_stale_recovery_and_new_devices(hass, entry):
         assert findings(hass)["stale_device-one"].created == first
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation(last_seen=dt_util.utcnow())]},
+        {"zha": lambda _, feature: [observation(last_seen=dt_util.utcnow())]},
         clear=True,
     ):
         monitor.async_scan()
         assert findings(hass) == {}
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: []},
+        {"zha": lambda _, feature: []},
         clear=True,
     ):
         monitor.async_scan()
         assert findings(hass) == {}
 
 
-async def test_ignore_persists_both_check_opt_out_and_reenroll(hass, entry):
+@pytest.mark.parametrize("feature", list(Feature))
+async def test_ignore_persists_only_own_feature_and_reenroll(hass, entry, feature):
     add_entry(hass, "zha")
     monitor = ready_monitor(hass, entry)
     unsubscribe = hass.bus.async_listen(
@@ -90,20 +91,22 @@ async def test_ignore_persists_both_check_opt_out_and_reenroll(hass, entry):
     disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation(diagnostics=(disabled,))]},
+        {"zha": lambda _, feature: [observation(diagnostics=(disabled,))]},
         clear=True,
     ):
         monitor.async_scan()
         assert len(findings(hass)) == 2
-        ir.async_get(hass).async_ignore(DOMAIN, "diagnostics_device-one", True)
+        ignored_kind = "diagnostics" if feature == Feature.CONFIGURATION else "stale"
+        remaining_kind = "stale" if feature == Feature.CONFIGURATION else "diagnostics"
+        ir.async_get(hass).async_ignore(DOMAIN, f"{ignored_kind}_device-one", True)
         await hass.async_block_till_done()
-        assert entry.options[CONF_EXCLUDED_DEVICES] == ["device-one"]
-        assert findings(hass) == {}
+        assert entry.options[feature.excluded_key] == ["device-one"]
+        assert set(findings(hass)) == {f"{remaining_kind}_device-one"}
         restarted = ready_monitor(hass, entry)
         restarted.async_scan()
-        assert findings(hass) == {}
+        assert set(findings(hass)) == {f"{remaining_kind}_device-one"}
         hass.config_entries.async_update_entry(
-            entry, options={CONF_EXCLUDED_DEVICES: []}
+            entry, options={feature.excluded_key: []}
         )
         restarted.async_scan()
         assert len(findings(hass)) == 2
@@ -123,7 +126,7 @@ async def test_restart_recovers_ignore_before_first_scan(hass, entry):
     )
     ir.async_get(hass).async_ignore(DOMAIN, "stale_device-one", True)
     monitor.async_scan()
-    assert monitor.excluded == {"device-one"}
+    assert all(monitor.excluded(feature) == {"device-one"} for feature in Feature)
     assert findings(hass) == {}
 
 
@@ -132,7 +135,7 @@ async def test_startup_grace(hass, entry):
     monitor = DeviceHealthMonitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
@@ -144,12 +147,12 @@ async def test_source_error_does_not_claim_recovery(hass, entry, caplog):
     monitor = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
 
-    def offline(_):
+    def offline(_, feature):
         raise SourceUnavailable("Disconnected")
 
     with patch.dict(
@@ -158,11 +161,15 @@ async def test_source_error_does_not_claim_recovery(hass, entry, caplog):
         clear=True,
     ):
         monitor.async_scan()
-        assert set(findings(hass)) == {"stale_device-one", "source_unavailable_zha"}
+        assert set(findings(hass)) == {
+            "stale_device-one",
+            "configuration_source_unavailable_zha",
+            "communication_source_unavailable_zha",
+        }
         assert "Disconnected" in caplog.text
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation(last_seen=dt_util.utcnow())]},
+        {"zha": lambda _, feature: [observation(last_seen=dt_util.utcnow())]},
         clear=True,
     ):
         monitor.async_scan()
@@ -191,7 +198,7 @@ async def test_real_flow_manager_requires_confirmation(hass, entry):
     entity = registry.async_update_entity(entity.entity_id, device_id=device.id)
     monitor = ready_monitor(hass, entry)
 
-    def observed(_):
+    def observed(_, feature):
         current = registry.async_get(entity.entity_id)
         state = (
             DiagnosticState.DISABLED if current.disabled_by else DiagnosticState.ENABLED
@@ -221,10 +228,10 @@ async def test_real_flow_manager_requires_confirmation(hass, entry):
         result = await manager.async_init(DOMAIN, context={"issue_id": issue_id})
         assert result["type"] == "form"
         assert registry.async_get(entity.entity_id).disabled_by is not None
-        assert monitor.excluded == set()
+        assert all(monitor.excluded(feature) == set() for feature in Feature)
         # Aborting/closing the dialog must not opt out or change the entity.
         manager.async_abort(result["flow_id"])
-        assert monitor.excluded == set()
+        assert all(monitor.excluded(feature) == set() for feature in Feature)
         assert issue_id in findings(hass)
         result = await manager.async_init(DOMAIN, context={"issue_id": issue_id})
         result = await manager.async_configure(
@@ -238,7 +245,7 @@ async def test_real_flow_manager_requires_confirmation(hass, entry):
 
 async def test_fix_cannot_reenable_excluded_device(hass, entry):
     monitor = ready_monitor(hass, entry)
-    monitor.async_exclude("device-one")
+    monitor.async_exclude("device-one", Feature.CONFIGURATION)
     from homeassistant.exceptions import HomeAssistantError
 
     with pytest.raises(HomeAssistantError, match="excluded"):
@@ -253,7 +260,7 @@ async def test_ignore_other_integration_does_not_exclude(hass, entry):
             {"domain": "other", "action": "update", "issue_id": "anything"},
         )
     )
-    assert monitor.excluded == set()
+    assert all(monitor.excluded(feature) == set() for feature in Feature)
 
 
 async def test_ignore_survives_real_issue_registry_reload(hass, entry):
@@ -262,7 +269,7 @@ async def test_ignore_survives_real_issue_registry_reload(hass, entry):
     monitor = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
@@ -275,14 +282,15 @@ async def test_ignore_survives_real_issue_registry_reload(hass, entry):
     assert recovered.data["device_id"] == "device-one"
     restarted = DeviceHealthMonitor(hass, entry)
     restarted.async_scan()
-    assert restarted.excluded == {"device-one"}
+    assert restarted.excluded(Feature.COMMUNICATION) == {"device-one"}
+    assert restarted.excluded(Feature.CONFIGURATION) == set()
     assert findings(hass) == {}
     await hass.config_entries._store.async_save(hass.config_entries._data_to_save())
     saved = await hass.config_entries._store.async_load()
     saved_entry = next(
         item for item in saved["entries"] if item["entry_id"] == entry.entry_id
     )
-    assert saved_entry["options"][CONF_EXCLUDED_DEVICES] == ["device-one"]
+    assert saved_entry["options"][Feature.COMMUNICATION.excluded_key] == ["device-one"]
 
 
 async def test_setup_unload_and_options_listener(hass, entry):
@@ -310,7 +318,7 @@ async def test_flow_exclude_and_failed_enable_are_explicit(hass, entry):
     disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation(diagnostics=(disabled,))]},
+        {"zha": lambda _, feature: [observation(diagnostics=(disabled,))]},
         clear=True,
     ):
         monitor.async_scan()
@@ -331,15 +339,16 @@ async def test_flow_exclude_and_failed_enable_are_explicit(hass, entry):
             result["flow_id"], user_input={"action": "enable"}
         )
     assert result["type"] == "form"
-    assert result["errors"] == {"base": "enable_failed"}
+    assert result["errors"] == {"base": "action_failed"}
     assert result["description_placeholders"]["error_details"] == "Disconnected"
     assert "diagnostics_device-one" in findings(hass)
     result = await manager.async_configure(
         result["flow_id"], user_input={"action": "exclude"}
     )
     assert result["type"] == "create_entry"
-    assert monitor.excluded == {"device-one"}
-    assert findings(hass) == {}
+    assert monitor.excluded(Feature.CONFIGURATION) == {"device-one"}
+    assert monitor.excluded(Feature.COMMUNICATION) == set()
+    assert set(findings(hass)) == {"stale_device-one"}
 
 
 @pytest.mark.parametrize(
@@ -362,7 +371,7 @@ async def test_stale_flow_snoozes_only_no_contact_until_exact_expiry(
     with (
         patch.dict(
             "custom_components.garath_device_health.monitor.COLLECTORS",
-            {"zha": lambda _: [observed]},
+            {"zha": lambda _, feature: [observed]},
             clear=True,
         ),
         patch(
@@ -387,7 +396,7 @@ async def test_stale_flow_snoozes_only_no_contact_until_exact_expiry(
             result["flow_id"], user_input={"action": action}
         )
         assert result["type"] == "create_entry"
-        assert monitor.excluded == set()
+        assert all(monitor.excluded(feature) == set() for feature in Feature)
         expiry = now + timedelta(days=days)
         assert monitor.snoozed_until == {"device-one": expiry.timestamp()}
         assert set(findings(hass)) == {"diagnostics_device-one"}
@@ -420,7 +429,7 @@ async def test_snooze_persists_in_config_entry_and_survives_restart(hass, entry)
     restarted = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         restarted.async_scan()
@@ -437,7 +446,11 @@ async def test_snooze_expiry_does_not_warn_after_contact_resumes(hass, entry):
     expiry = dt_util.utc_from_timestamp(monitor.snoozed_until["device-one"])
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation(last_seen=expiry - timedelta(hours=1))]},
+        {
+            "zha": lambda _, feature: [
+                observation(last_seen=expiry - timedelta(hours=1))
+            ]
+        },
         clear=True,
     ):
         monitor.async_scan(expiry)
@@ -451,13 +464,17 @@ async def test_snooze_does_not_suppress_unknown_contact_or_source_errors(hass, e
     monitor.async_snooze("device-one", timedelta(days=1))
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [Observation("device-one", "Device", "zha", None, ())]},
+        {
+            "zha": lambda _, feature: [
+                Observation("device-one", "Device", "zha", None, ())
+            ]
+        },
         clear=True,
     ):
         monitor.async_scan()
         assert set(findings(hass)) == {"last_seen_unknown_device-one"}
 
-    def offline(_):
+    def offline(_, feature):
         raise SourceUnavailable("Disconnected")
 
     with patch.dict(
@@ -466,7 +483,7 @@ async def test_snooze_does_not_suppress_unknown_contact_or_source_errors(hass, e
         clear=True,
     ):
         monitor.async_scan()
-        assert "source_unavailable_zha" in findings(hass)
+        assert "communication_source_unavailable_zha" in findings(hass)
 
 
 async def test_snooze_removes_retained_stale_issue_when_source_is_offline(hass, entry):
@@ -474,7 +491,7 @@ async def test_snooze_removes_retained_stale_issue_when_source_is_offline(hass, 
     monitor = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
@@ -490,7 +507,7 @@ async def test_snooze_removes_retained_stale_issue_when_source_is_offline(hass, 
         data={"device_id": "device-one", "protocol": "zha"},
     )
 
-    def offline(_):
+    def offline(_, feature):
         raise SourceUnavailable("Disconnected")
 
     with patch.dict(
@@ -499,7 +516,10 @@ async def test_snooze_removes_retained_stale_issue_when_source_is_offline(hass, 
         clear=True,
     ):
         monitor.async_scan()
-        assert set(findings(hass)) == {"source_unavailable_zha"}
+        assert set(findings(hass)) == {
+            "configuration_source_unavailable_zha",
+            "communication_source_unavailable_zha",
+        }
 
 
 async def test_snooze_is_per_device_and_keeps_unavailable_diagnostics(hass, entry):
@@ -514,7 +534,7 @@ async def test_snooze_is_per_device_and_keeps_unavailable_diagnostics(hass, entr
     monitor.async_snooze("device-one", timedelta(days=1))
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observed, other_device]},
+        {"zha": lambda _, feature: [observed, other_device]},
         clear=True,
     ):
         monitor.async_scan()
@@ -530,8 +550,9 @@ async def test_exclusion_removes_snooze_and_cannot_be_snoozed(hass, entry):
     monitor = ready_monitor(hass, entry)
     monitor.async_snooze("device-one", timedelta(days=1))
     monitor.async_snooze("device-two", timedelta(days=7))
-    monitor.async_exclude("device-one")
-    assert monitor.excluded == {"device-one"}
+    monitor.async_exclude("device-one", Feature.COMMUNICATION)
+    assert monitor.excluded(Feature.COMMUNICATION) == {"device-one"}
+    assert monitor.excluded(Feature.CONFIGURATION) == set()
     assert set(monitor.snoozed_until) == {"device-two"}
     with pytest.raises(HomeAssistantError, match="excluded"):
         monitor.async_snooze("device-one", timedelta(days=1))
@@ -542,11 +563,11 @@ async def test_stale_repair_permanent_exclusion_and_invalid_enable(hass, entry):
     monitor = ready_monitor(hass, entry)
     with patch.dict(
         "custom_components.garath_device_health.monitor.COLLECTORS",
-        {"zha": lambda _: [observation()]},
+        {"zha": lambda _, feature: [observation()]},
         clear=True,
     ):
         monitor.async_scan()
-    flow = repairs.DeviceHealthRepairFlow("stale_device-one")
+    flow = repairs.CommunicationRepairFlow("stale_device-one")
     flow.hass = hass
     result = await flow.async_step_confirm({"action": "enable"})
     assert result["type"] == "form"
@@ -554,5 +575,239 @@ async def test_stale_repair_permanent_exclusion_and_invalid_enable(hass, entry):
     assert monitor.snoozed_until == {}
     result = await flow.async_step_confirm({"action": "exclude"})
     assert result["type"] == "create_entry"
-    assert monitor.excluded == {"device-one"}
+    assert monitor.excluded(Feature.COMMUNICATION) == {"device-one"}
     assert findings(hass) == {}
+
+
+@pytest.mark.parametrize("disabled_feature", list(Feature))
+async def test_feature_toggle_stops_only_its_checks_and_can_resume(
+    hass, entry, disabled_feature
+):
+    from homeassistant.exceptions import HomeAssistantError
+
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    observed = observation(
+        diagnostics=(Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED),)
+    )
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _, feature: [observed]},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert len(findings(hass)) == 2
+        hass.config_entries.async_update_entry(
+            entry, options={disabled_feature.enabled_key: False}
+        )
+
+        def enabled_only(_, feature):
+            assert feature != disabled_feature
+            return [observed]
+
+        with patch.dict(
+            "custom_components.garath_device_health.monitor.COLLECTORS",
+            {"zha": enabled_only},
+            clear=True,
+        ):
+            monitor.async_scan()
+        remaining = (
+            "stale_device-one"
+            if disabled_feature == Feature.CONFIGURATION
+            else "diagnostics_device-one"
+        )
+        assert set(findings(hass)) == {remaining}
+        with pytest.raises(HomeAssistantError, match="disabled"):
+            if disabled_feature == Feature.CONFIGURATION:
+                monitor.async_enable_diagnostics("device-one", "zha")
+            else:
+                monitor.async_snooze("device-one", timedelta(days=1))
+        hass.config_entries.async_update_entry(
+            entry, options={disabled_feature.enabled_key: True}
+        )
+        monitor.async_scan()
+        assert len(findings(hass)) == 2
+
+
+@pytest.mark.parametrize("failed_feature", list(Feature))
+async def test_feature_source_failure_retains_only_its_findings(
+    hass, entry, failed_feature
+):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    observed = observation(
+        diagnostics=(Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED),)
+    )
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _, feature: [observed]},
+        clear=True,
+    ):
+        monitor.async_scan()
+
+    def failed(_, feature):
+        if feature == failed_feature:
+            raise SourceUnavailable("Disconnected")
+        # The other feature can independently establish recovery.
+        return [observation(last_seen=dt_util.utcnow())]
+
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": failed},
+        clear=True,
+    ):
+        monitor.async_scan()
+        retained = (
+            "diagnostics_device-one"
+            if failed_feature == Feature.CONFIGURATION
+            else "stale_device-one"
+        )
+        assert set(findings(hass)) == {
+            retained,
+            f"{failed_feature}_source_unavailable_zha",
+        }
+        source_id = f"{failed_feature}_source_unavailable_zha"
+        ir.async_get(hass).async_ignore(DOMAIN, source_id, True)
+        monitor.async_scan()
+        assert all(monitor.excluded(feature) == set() for feature in Feature)
+
+
+@pytest.mark.parametrize("failed_feature", list(Feature))
+async def test_real_device_error_is_scoped_and_recovers(
+    hass, entry, zha_network, failed_feature, caplog
+):
+    source, nodes, devices = zha_network
+    old_contact = dt_util.utcnow() - timedelta(days=2)
+    for node in nodes.values():
+        node.last_seen = old_contact.timestamp()
+    monitor = ready_monitor(hass, entry)
+    monitor.async_scan()
+    original = {f"diagnostics_{device.id}" for device in devices.values()} | {
+        f"stale_{device.id}" for device in devices.values()
+    }
+    assert set(findings(hass)) == original
+    duplicate = None
+    if failed_feature == Feature.CONFIGURATION:
+        duplicate = er.async_get(hass).async_get_or_create(
+            "sensor",
+            "zha",
+            "duplicate-rssi",
+            config_entry=source,
+            device_id=devices[1].id,
+            translation_key="rssi",
+        )
+    else:
+        nodes[1].last_seen = float("nan")
+    monitor.async_scan()
+    error_id = f"{failed_feature}_unavailable_{devices[1].id}"
+    assert set(findings(hass)) == original | {error_id}
+    assert f"Cannot check {failed_feature}" in caplog.text
+    # A repeated failure keeps the original finding, without repeated logs.
+    caplog.clear()
+    monitor.async_scan()
+    assert set(findings(hass)) == original | {error_id}
+    assert caplog.text == ""
+    if duplicate is not None:
+        er.async_get(hass).async_remove(duplicate.entity_id)
+    else:
+        nodes[1].last_seen = old_contact.timestamp()
+    monitor.async_scan()
+    assert set(findings(hass)) == original
+    assert error_id not in findings(hass)
+
+
+@pytest.mark.parametrize("feature", list(Feature))
+async def test_ignore_device_error_is_feature_specific(hass, entry, feature):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
+
+    def observed(_, check):
+        if check == feature:
+            return [
+                Observation("device-one", "Device", "zha", None, (), "Invalid data")
+            ]
+        return [observation(diagnostics=(disabled,))]
+
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": observed},
+        clear=True,
+    ):
+        monitor.async_scan()
+        ir.async_get(hass).async_ignore(
+            DOMAIN, f"{feature}_unavailable_device-one", True
+        )
+        monitor.async_scan()
+        assert monitor.excluded(feature) == {"device-one"}
+        other_feature = next(item for item in Feature if item != feature)
+        assert monitor.excluded(other_feature) == set()
+        remaining = (
+            "stale_device-one"
+            if feature == Feature.CONFIGURATION
+            else "diagnostics_device-one"
+        )
+        assert set(findings(hass)) == {remaining}
+
+
+async def test_configuration_exclusion_does_not_remove_communication_snooze(
+    hass, entry
+):
+    monitor = ready_monitor(hass, entry)
+    monitor.async_snooze("device-one", timedelta(days=30))
+    snooze = monitor.snoozed_until
+    monitor.async_exclude("device-one", Feature.CONFIGURATION)
+    assert monitor.snoozed_until == snooze
+    assert monitor.excluded(Feature.COMMUNICATION) == set()
+
+
+async def test_legacy_exclusions_remain_in_both_after_migration(hass, entry):
+    from custom_components.garath_device_health import async_migrate_entry
+    from custom_components.garath_device_health.const import CONF_EXCLUDED_DEVICES
+
+    add_entry(hass, "zha")
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_EXCLUDED_DEVICES: ["device-one"]}
+    )
+    assert await async_migrate_entry(hass, entry)
+    monitor = ready_monitor(hass, entry)
+    disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _, feature: [observation(diagnostics=(disabled,))]},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert findings(hass) == {}
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, Feature.CONFIGURATION.excluded_key: []},
+        )
+        monitor.async_scan()
+        assert set(findings(hass)) == {"diagnostics_device-one"}
+
+
+@pytest.mark.parametrize("feature", list(Feature))
+async def test_open_repair_cannot_act_after_feature_is_disabled(hass, entry, feature):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _, feature: [observation(diagnostics=(disabled,))]},
+        clear=True,
+    ):
+        monitor.async_scan()
+    if feature == Feature.CONFIGURATION:
+        flow = repairs.ConfigurationRepairFlow("diagnostics_device-one")
+        action = "enable"
+    else:
+        flow = repairs.CommunicationRepairFlow("stale_device-one")
+        action = "snooze_30_days"
+    flow.hass = hass
+    assert (await flow.async_step_confirm())["type"] == "form"
+    hass.config_entries.async_update_entry(entry, options={feature.enabled_key: False})
+    result = await flow.async_step_confirm({"action": action})
+    assert result["type"] == "abort"
+    assert result["reason"] == "feature_disabled"
+    assert monitor.snoozed_until == {}

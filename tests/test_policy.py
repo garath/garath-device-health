@@ -9,7 +9,11 @@ from custom_components.garath_device_health.models import (
     DiagnosticState,
     Observation,
 )
-from custom_components.garath_device_health.policy import evaluate, timestamp
+from custom_components.garath_device_health.policy import (
+    evaluate_communication,
+    evaluate_configuration,
+    timestamp,
+)
 
 NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 
@@ -25,7 +29,7 @@ NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 )
 def test_exact_stale_boundary(age, expected):
     observed = Observation("one", "Device", "zha", NOW - age, ())
-    assert bool(evaluate([observed], set(), NOW)) == expected
+    assert bool(evaluate_communication([observed], set(), NOW)) == expected
 
 
 def test_diagnostics_and_stale_are_independent():
@@ -36,11 +40,14 @@ def test_diagnostics_and_stale_are_independent():
         NOW - timedelta(days=2),
         (Diagnostic("RSSI", "sensor.renamed", DiagnosticState.DISABLED),),
     )
-    assert {item.kind for item in evaluate([observed], set(), NOW)} == {
-        "diagnostics",
-        "stale",
+    assert {item.kind for item in evaluate_configuration([observed], set())} == {
+        "diagnostics"
     }
-    assert evaluate([observed], {"one"}, NOW) == []
+    assert {item.kind for item in evaluate_communication([observed], set(), NOW)} == {
+        "stale"
+    }
+    assert evaluate_configuration([observed], {"one"}) == []
+    assert evaluate_communication([observed], {"one"}, NOW) == []
 
 
 def test_unknown_missing_and_blocked_are_explicit():
@@ -54,9 +61,11 @@ def test_unknown_missing_and_blocked_are_explicit():
             Diagnostic("LQI", "sensor.lqi", DiagnosticState.BLOCKED),
         ),
     )
-    assert {item.kind for item in evaluate([observed], set(), NOW)} == {
-        "diagnostics_unavailable",
-        "last_seen_unknown",
+    assert {item.kind for item in evaluate_configuration([observed], set())} == {
+        "diagnostics_unavailable"
+    }
+    assert {item.kind for item in evaluate_communication([observed], set(), NOW)} == {
+        "last_seen_unknown"
     }
 
 
@@ -69,3 +78,5 @@ def test_timestamp_normalization():
         timestamp(NOW.replace(tzinfo=None))
     with pytest.raises(ValueError, match="finite"):
         timestamp(float("nan"))
+    with pytest.raises(ValueError, match="supported range"):
+        timestamp(1e30)

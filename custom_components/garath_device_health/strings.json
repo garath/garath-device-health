@@ -3,8 +3,12 @@
   "config": {
     "step": {
       "user": {
-        "title": "Monitor Z-Wave JS and ZHA devices",
-        "description": "Include all current and future Z-Wave JS and ZHA end devices. Repairs offer to enable diagnostic entities and separately warn after 24 hours without communication. Nothing is enabled without confirmation. Ignoring any device repair excludes that device from BOTH checks until you include it again in the integration options. Closing a repair dialog does not exclude it."
+        "title": "Choose independent device features",
+        "description": "Diagnostic configuration checks whether expected diagnostic entities are available and enabled; it does not determine device connectivity. Communication monitoring reads native last-contact times and warns after 24 hours; it does not require diagnostic entities to be enabled. Both include current and future Z-Wave JS and ZHA end devices. Nothing is enabled on a device without confirmation. Each feature has its own exclusions and can be turned off in integration options.",
+        "data": {
+          "configuration_enabled": "Check diagnostic configuration",
+          "communication_enabled": "Monitor communication"
+        }
       }
     },
     "abort": {
@@ -14,20 +18,41 @@
   "options": {
     "step": {
       "init": {
-        "title": "Device exclusions and snoozes",
-        "description": "All supported devices are included by default. Excluded devices are omitted from BOTH checks. Ignoring a device repair adds it here. Remove an exclusion to resume monitoring.\n\nNo-contact snoozes affect only the 24-hour communication warning. Each snoozed device is listed with its snoozed-until time in your Home Assistant time zone. Select devices under Unsnooze devices to end their snoozes early; leave them unselected to keep snoozing.",
+        "title": "Independent device features",
+        "menu_options": {
+          "configuration": "Diagnostic configuration",
+          "communication": "Communication monitoring"
+        }
+      },
+      "configuration": {
+        "title": "Diagnostic configuration",
+        "description": "Check whether expected diagnostic entities are available and enabled. This is a configuration check, not a connectivity test. Turning off this feature or excluding a device does not affect communication monitoring. Ignoring a configuration repair excludes the device only from this feature. Remove an exclusion to resume configuration checks.",
         "data": {
-          "excluded_devices": "Excluded devices",
+          "enabled": "Enable diagnostic configuration checks",
+          "excluded_devices": "Devices excluded from configuration checks"
+        }
+      },
+      "communication": {
+        "title": "Communication monitoring",
+        "description": "Warn after 24 hours without observed communication, using native protocol timestamps independently of diagnostic entity settings. Turning off this feature or excluding a device does not affect diagnostic configuration checks. Ignoring a communication repair excludes the device only from this feature.\n\nSnoozed devices are listed with expiry times in your Home Assistant time zone. Select devices under Unsnooze devices to end their snoozes early; leave them unselected to keep snoozing. Unknown last-contact times and source warnings are not snoozed.",
+        "data": {
+          "enabled": "Enable communication monitoring",
+          "excluded_devices": "Devices excluded from communication monitoring",
           "unsnooze_devices": "Unsnooze devices"
         }
       }
     }
   },
   "selector": {
-    "repair_action": {
+    "configuration_action": {
       "options": {
         "enable": "Enable the listed diagnostic entities",
-        "exclude": "Exclude this device permanently from all monitoring",
+        "exclude": "Stop configuration checks for this device"
+      }
+    },
+    "communication_action": {
+      "options": {
+        "exclude": "Stop communication monitoring for this device",
         "snooze_day": "Snooze the no-contact warning for 24 hours",
         "snooze_week": "Snooze the no-contact warning for 7 days",
         "snooze_30_days": "Snooze the no-contact warning for 30 days"
@@ -36,65 +61,84 @@
   },
   "issues": {
     "diagnostics": {
-      "title": "Enable diagnostics for {device}",
-      "description": "These diagnostic entities are disabled: {details}. Use the repair flow to enable them, or exclude this device. This changes Home Assistant entity settings, not device parameters. Last-seen monitoring is independent. Ignoring this repair excludes the device from BOTH checks; closing the dialog does not.",
+      "title": "Diagnostic configuration: enable entities for {device}",
+      "description": "These diagnostic entities are disabled: {details}. This is a configuration recommendation, not evidence that the device is offline. Open the repair to enable the entities or stop configuration checks for this device. Ignoring this repair affects only configuration checks. Communication monitoring continues independently.",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Enable diagnostics for {device}",
-            "description": "Enable: {details}.\n\nThis only enables Home Assistant entities. It does not change device parameters, configure reporting, or send pings. Enabling entities can increase Recorder history. Alternatively, exclude this device from BOTH monitoring checks. Ignoring the repair also excludes it; closing this dialog does not.\n\n{error_details}",
+            "title": "Diagnostic configuration for {device}",
+            "description": "Enable: {details}.\n\nThis only enables Home Assistant entities. It does not change device parameters, configure reporting, or send pings. Enabling entities can increase Recorder history. Alternatively, stop configuration checks for this device. Neither choice changes communication monitoring. Ignoring this repair also stops only configuration checks; closing this dialog changes nothing.\n\n{error_details}",
             "data": {
-              "action": "Action"
+              "action": "Configuration action"
             }
           }
         },
         "error": {
-          "enable_failed": "Could not enable diagnostics. See the details above and retry.",
-          "invalid_action": "Choose one of the listed actions."
+          "action_failed": "Could not enable diagnostics. See the details above and retry.",
+          "invalid_action": "Choose one of the listed configuration actions."
         },
         "abort": {
           "issue_gone": "This issue is no longer active.",
           "not_loaded": "Garath Device Health is not loaded.",
           "invalid_issue": "The repair metadata is invalid.",
-          "excluded": "This device is excluded. Include it again in integration options."
+          "excluded": "Configuration checks are excluded for this device. Change this in integration options.",
+          "feature_disabled": "Diagnostic configuration checks are turned off."
         }
       }
     },
     "diagnostics_unavailable": {
-      "title": "Diagnostics unavailable for {device}",
-      "description": "These expected diagnostic entities are missing or blocked by a disabled device/config entry: {details}. They cannot be enabled by this flow. Check the owning integration, finish device discovery, and check device/entity settings. Last-seen monitoring continues independently. Ignoring this repair excludes this device from BOTH checks. Re-enable monitoring in integration options."
+      "title": "Diagnostic configuration: entities unavailable for {device}",
+      "description": "These expected diagnostic entities are missing or blocked: {details}. Check the owning integration, finish device discovery, and check device/entity settings. This does not establish whether the device is communicating. Ignoring this repair stops only configuration checks for this device; communication monitoring continues independently."
     },
     "last_seen_unknown": {
-      "title": "Last-seen time is unknown for {device}",
-      "description": "{details} Check the owning integration and allow the device to communicate normally, or wake it manually according to its instructions. This is not a claim that the device has failed. No stale-device determination is made until a timestamp is known. Ignoring this repair excludes this device from BOTH checks. Re-enable monitoring in integration options."
+      "title": "Communication monitoring: last contact unknown for {device}",
+      "description": "{details} Check the owning integration and allow the device to communicate normally, or wake it manually according to its instructions. This is not a claim that the device has failed. No stale-device determination is made until a timestamp is known. Ignoring this repair stops only communication monitoring for this device. Configuration checks are unaffected."
     },
     "stale": {
-      "title": "No communication observed for {device} in 24 hours",
-      "description": "Last observed communication (UTC): {details}.\n\nCheck power, batteries, range, and the owning integration. Some healthy battery devices communicate less frequently than daily. Open this repair to snooze the no-contact warning for 24 hours, 7 days, or 30 days, or permanently exclude the device. Snoozing keeps diagnostic checks active. This repair clears automatically when communication resumes. It does not ping or wake devices. Ignoring this repair excludes this device from BOTH checks. Manage exclusions and snoozes in integration options.",
+      "title": "Communication monitoring: no contact with {device} in 24 hours",
+      "description": "Last observed communication (UTC): {details}.\n\nCheck power, batteries, range, and the owning integration. Some healthy battery devices communicate less frequently than daily. Open this repair to snooze the no-contact warning for 24 hours, 7 days, or 30 days, or stop communication monitoring for this device. It clears automatically when communication resumes and does not ping or wake devices. Ignoring this repair stops only communication monitoring. Configuration checks are unaffected.",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "No-contact warning for {device}",
-            "description": "Last observed communication (UTC): {details}.\n\nSnooze this warning for 24 hours, 7 days, or 30 days without disabling diagnostic checks or changing the last-contact time. Snoozes survive restarts and can be ended early in integration options. When a snooze expires, the next scan warns again only if communication is still overdue.\n\nPermanent exclusion and Home Assistant's Ignore action both disable ALL monitoring checks for this device. Closing this dialog changes nothing.",
+            "title": "Communication monitoring for {device}",
+            "description": "Last observed communication (UTC): {details}.\n\nSnooze this warning for 24 hours, 7 days, or 30 days without changing the last-contact time. Snoozes survive restarts and can be ended early in communication monitoring options. When a snooze expires, the next scan warns again only if communication is still overdue.\n\nStopping communication monitoring permanently, or using Home Assistant's Ignore action, affects only this feature. Diagnostic configuration checks are unaffected. Closing this dialog changes nothing.\n\n{error_details}",
             "data": {
-              "action": "Action"
+              "action": "Communication action"
             }
           }
         },
         "error": {
-          "invalid_action": "Choose one of the listed actions."
+          "action_failed": "Could not snooze the warning. See the details above and retry.",
+          "invalid_action": "Choose one of the listed communication actions."
         },
         "abort": {
           "issue_gone": "This issue is no longer active.",
           "not_loaded": "Garath Device Health is not loaded.",
           "invalid_issue": "The repair metadata is invalid.",
-          "excluded": "This device is excluded. Include it again in integration options."
+          "excluded": "Communication monitoring is excluded for this device. Change this in integration options.",
+          "feature_disabled": "Communication monitoring is turned off."
         }
       }
     },
+    "configuration_unavailable": {
+      "title": "Diagnostic configuration: cannot check {device}",
+      "description": "Cannot inspect diagnostic configuration: {details}.\n\nCheck the owning integration and Home Assistant logs. Existing configuration findings for this device are retained until the data can be trusted again. Other devices and communication monitoring continue independently. Ignoring this repair stops only configuration checks for this device."
+    },
+    "communication_unavailable": {
+      "title": "Communication monitoring: cannot check {device}",
+      "description": "Cannot read a usable last-contact time: {details}.\n\nCheck the owning integration and Home Assistant logs. Existing communication findings for this device are retained until the data can be trusted again; this is not recovery. Other devices and configuration checks continue independently. Ignoring this repair stops only communication monitoring for this device."
+    },
+    "configuration_source_unavailable": {
+      "title": "Diagnostic configuration checks paused for {protocol}",
+      "description": "Cannot inspect the owning integration: {details}.\n\nCheck the integration connection and Home Assistant logs. Existing configuration findings for this protocol are retained. Communication monitoring and other protocols continue independently when their data is available. Ignoring this source warning does not exclude devices."
+    },
+    "communication_source_unavailable": {
+      "title": "Communication monitoring paused for {protocol}",
+      "description": "Cannot read the owning integration: {details}.\n\nCheck the integration connection and Home Assistant logs. Existing communication findings for this protocol are retained. Configuration checks and other protocols continue independently when their data is available. Ignoring this source warning does not exclude devices."
+    },
     "source_unavailable": {
       "title": "Device health monitoring paused for {protocol}",
-      "description": "Cannot read the owning integration: {details}.\n\nRestore the integration connection and check the Home Assistant logs. No new device conclusions are made for this protocol while it is unavailable; existing device issues are retained. The other protocol continues to be monitored. This warning clears when monitoring resumes. Ignoring this source warning does not exclude devices."
+      "description": "Cannot read the owning integration: {details}. This legacy warning is replaced by feature-specific warnings on the next scan. Ignoring this source warning does not exclude devices."
     }
   }
 }

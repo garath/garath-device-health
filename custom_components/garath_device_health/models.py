@@ -32,6 +32,7 @@ class Observation:
     protocol: str
     last_seen: datetime | None
     diagnostics: tuple[Diagnostic, ...]
+    error: str | None = None
 
 
 @dataclass(frozen=True)

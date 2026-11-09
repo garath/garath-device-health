@@ -10,14 +10,17 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
-from .const import DOMAIN
+from .const import DOMAIN, Feature
 from .monitor import DeviceHealthMonitor
 
 _SNOOZE_DAYS = {"snooze_day": 1, "snooze_week": 7, "snooze_30_days": 30}
 
 
-class DeviceHealthRepairFlow(RepairsFlow):
-    """Enable diagnostics, snooze a stale warning, or exclude the device."""
+class FeatureRepairFlow(RepairsFlow):
+    """Shared confirmation and validation for a feature-specific repair."""
+
+    feature: Feature
+    actions: list[str]
 
     def __init__(self, issue_id: str) -> None:
         self.issue_id = issue_id
@@ -41,31 +44,26 @@ class DeviceHealthRepairFlow(RepairsFlow):
         protocol = issue.data.get("protocol")
         if not isinstance(device_id, str) or not isinstance(protocol, str):
             return self.async_abort(reason="invalid_issue")
-        if device_id in monitor.excluded:
-            return self.async_abort(reason="excluded")
-        if issue.translation_key == "stale":
-            actions = [*_SNOOZE_DAYS, "exclude"]
-        elif issue.translation_key == "diagnostics":
-            actions = ["enable", "exclude"]
-        else:
+        if monitor.issue_feature(issue) != self.feature:
             return self.async_abort(reason="invalid_issue")
+        if not monitor.enabled(self.feature):
+            return self.async_abort(reason="feature_disabled")
+        if device_id in monitor.excluded(self.feature):
+            return self.async_abort(reason="excluded")
         errors: dict[str, str] = {}
         error_details = ""
         if user_input is not None:
             action = user_input.get("action")
-            if action not in actions:
+            if action not in self.actions:
                 errors["base"] = "invalid_action"
             elif action == "exclude":
-                monitor.async_exclude(device_id)
+                monitor.async_exclude(device_id, self.feature)
                 return self.async_create_entry(data={})
-            elif action in _SNOOZE_DAYS:
-                monitor.async_snooze(device_id, timedelta(days=_SNOOZE_DAYS[action]))
-                return self.async_create_entry(data={})
-            elif action == "enable":
+            else:
                 try:
-                    monitor.async_enable_diagnostics(device_id, protocol)
+                    self._perform_action(monitor, device_id, protocol, action)
                 except HomeAssistantError as err:
-                    errors["base"] = "enable_failed"
+                    errors["base"] = "action_failed"
                     error_details = str(err)
                 else:
                     return self.async_create_entry(data={})
@@ -73,10 +71,12 @@ class DeviceHealthRepairFlow(RepairsFlow):
             step_id="confirm",
             data_schema=vol.Schema(
                 {
-                    vol.Required("action", default=actions[0]): selector.SelectSelector(
+                    vol.Required(
+                        "action", default=self.actions[0]
+                    ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=actions,
-                            translation_key="repair_action",
+                            options=self.actions,
+                            translation_key=f"{self.feature}_action",
                         )
                     )
                 }
@@ -88,6 +88,35 @@ class DeviceHealthRepairFlow(RepairsFlow):
             },
         )
 
+    def _perform_action(
+        self, monitor: DeviceHealthMonitor, device_id: str, protocol: str, action: str
+    ) -> None:
+        raise NotImplementedError
+
+
+class ConfigurationRepairFlow(FeatureRepairFlow):
+    """Enable diagnostic entities without changing communication monitoring."""
+
+    feature = Feature.CONFIGURATION
+    actions = ["enable", "exclude"]
+
+    def _perform_action(
+        self, monitor: DeviceHealthMonitor, device_id: str, protocol: str, action: str
+    ) -> None:
+        monitor.async_enable_diagnostics(device_id, protocol)
+
+
+class CommunicationRepairFlow(FeatureRepairFlow):
+    """Snooze no-contact warnings without changing diagnostic configuration."""
+
+    feature = Feature.COMMUNICATION
+    actions = [*_SNOOZE_DAYS, "exclude"]
+
+    def _perform_action(
+        self, monitor: DeviceHealthMonitor, device_id: str, protocol: str, action: str
+    ) -> None:
+        monitor.async_snooze(device_id, timedelta(days=_SNOOZE_DAYS[action]))
+
 
 async def async_create_fix_flow(
     hass: HomeAssistant,
@@ -95,4 +124,10 @@ async def async_create_fix_flow(
     data: dict[str, str | int | float | None] | None,
 ) -> RepairsFlow:
     """Create the confirmation flow for this device repair."""
-    return DeviceHealthRepairFlow(issue_id)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    if (
+        issue is not None
+        and DeviceHealthMonitor.issue_feature(issue) == Feature.COMMUNICATION
+    ):
+        return CommunicationRepairFlow(issue_id)
+    return ConfigurationRepairFlow(issue_id)

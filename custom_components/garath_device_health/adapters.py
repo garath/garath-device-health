@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from .const import Feature
 from .models import Diagnostic, DiagnosticState, Observation
 from .policy import timestamp
 
@@ -37,8 +38,8 @@ def diagnostic(
     return Diagnostic(label, entity_id, state)
 
 
-def collect_zwave(hass: HomeAssistant) -> list[Observation]:
-    """Read Z-Wave JS statistics, even when their sensor entities are disabled."""
+def collect_zwave(hass: HomeAssistant, feature: Feature) -> list[Observation]:
+    """Read only the Z-Wave JS data required by this feature."""
     devices = dr.async_get(hass)
     entities = er.async_get(hass)
     observations: list[Observation] = []
@@ -63,34 +64,44 @@ def collect_zwave(hass: HomeAssistant) -> list[Observation]:
             if device is None or device.disabled_by is not None:
                 continue
             base_id = f"{controller.home_id}.{node.node_id}"
-            diagnostics = tuple(
-                diagnostic(
-                    entities,
-                    label,
-                    entities.async_get_entity_id(
-                        "sensor", "zwave_js", base_id + suffix
-                    ),
-                )
-                for label, suffix in (
-                    ("Last seen", ".statistics_last_seen"),
-                    ("Signal strength", ".statistics_rssi"),
-                    ("Node status", ".node_status"),
-                )
-            )
+            diagnostics: tuple[Diagnostic, ...] = ()
+            last_seen = None
+            error = None
+            try:
+                if feature == Feature.CONFIGURATION:
+                    diagnostics = tuple(
+                        diagnostic(
+                            entities,
+                            label,
+                            entities.async_get_entity_id(
+                                "sensor", "zwave_js", base_id + suffix
+                            ),
+                        )
+                        for label, suffix in (
+                            ("Last seen", ".statistics_last_seen"),
+                            ("Signal strength", ".statistics_rssi"),
+                            ("Node status", ".node_status"),
+                        )
+                    )
+                else:
+                    last_seen = timestamp(node.statistics.last_seen)
+            except (SourceUnavailable, AttributeError, TypeError, ValueError) as err:
+                error = str(err) or type(err).__name__
             observations.append(
                 Observation(
                     device.id,
                     device.name_by_user or device.name or f"Z-Wave node {node.node_id}",
                     "zwave_js",
-                    timestamp(node.statistics.last_seen),
+                    last_seen,
                     diagnostics,
+                    error,
                 )
             )
     return observations
 
 
-def collect_zha(hass: HomeAssistant) -> list[Observation]:
-    """Read ZHA's last-seen timestamp and diagnostic entity metadata."""
+def collect_zha(hass: HomeAssistant, feature: Feature) -> list[Observation]:
+    """Read ZHA contact times independently from diagnostic configuration."""
     entries = [
         entry
         for entry in hass.config_entries.async_entries("zha")
@@ -117,34 +128,45 @@ def collect_zha(hass: HomeAssistant) -> list[Observation]:
         )
         if device is None or device.disabled_by is not None:
             continue
-        device_entities = er.async_entries_for_device(
-            entities, device.id, include_disabled_entities=True
-        )
         diagnostics: list[Diagnostic] = []
-        for key, label in (("rssi", "RSSI"), ("lqi", "LQI")):
-            candidates = [
-                entity
-                for entity in device_entities
-                if entity.platform == "zha"
-                and entity.domain == "sensor"
-                and entity.translation_key == key
-            ]
-            if len(candidates) > 1:
-                raise SourceUnavailable(
-                    f"Ambiguous {key} diagnostic entities for {device.id}"
+        last_seen = None
+        error = None
+        try:
+            if feature == Feature.CONFIGURATION:
+                device_entities = er.async_entries_for_device(
+                    entities, device.id, include_disabled_entities=True
                 )
-            diagnostics.append(
-                diagnostic(
-                    entities, label, candidates[0].entity_id if candidates else None
-                )
-            )
+                for key, label in (("rssi", "RSSI"), ("lqi", "LQI")):
+                    candidates = [
+                        entity
+                        for entity in device_entities
+                        if entity.platform == "zha"
+                        and entity.domain == "sensor"
+                        and entity.translation_key == key
+                    ]
+                    if len(candidates) > 1:
+                        raise SourceUnavailable(
+                            f"Ambiguous {key} diagnostic entities for {device.id}"
+                        )
+                    diagnostics.append(
+                        diagnostic(
+                            entities,
+                            label,
+                            candidates[0].entity_id if candidates else None,
+                        )
+                    )
+            else:
+                last_seen = timestamp(node.last_seen)
+        except (SourceUnavailable, AttributeError, TypeError, ValueError) as err:
+            error = str(err) or type(err).__name__
         observations.append(
             Observation(
                 device.id,
                 device.name_by_user or device.name or str(node.ieee),
                 "zha",
-                timestamp(node.last_seen),
+                last_seen,
                 tuple(diagnostics),
+                error,
             )
         )
     return observations

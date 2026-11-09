@@ -7,13 +7,13 @@ from .const import STALE_AFTER
 from .models import DiagnosticState, Finding, Observation, issue_id
 
 
-def evaluate(
-    devices: list[Observation], excluded: set[str], now: datetime
+def evaluate_configuration(
+    devices: list[Observation], excluded: set[str]
 ) -> list[Finding]:
-    """Evaluate the two independent checks without changing devices."""
+    """Check diagnostic entity configuration without reading contact times."""
     findings: list[Finding] = []
     for device in devices:
-        if device.device_id in excluded:
+        if device.device_id in excluded or device.error is not None:
             continue
         disabled = [
             item.label
@@ -45,6 +45,17 @@ def evaluate(
                     ", ".join(unsupported),
                 )
             )
+    return findings
+
+
+def evaluate_communication(
+    devices: list[Observation], excluded: set[str], now: datetime
+) -> list[Finding]:
+    """Check native contact times without inspecting diagnostic configuration."""
+    findings: list[Finding] = []
+    for device in devices:
+        if device.device_id in excluded or device.error is not None:
+            continue
         if device.last_seen is None:
             findings.append(
                 Finding(
@@ -82,4 +93,7 @@ def timestamp(value: datetime | float | int | None) -> datetime | None:
         raise ValueError("Last-seen timestamp must be finite")
     if value <= 0:
         return None
-    return datetime.fromtimestamp(value, UTC)
+    try:
+        return datetime.fromtimestamp(value, UTC)
+    except (OverflowError, OSError) as err:
+        raise ValueError("Last-seen timestamp is outside the supported range") from err

@@ -16,6 +16,7 @@ from custom_components.garath_device_health.adapters import (
     collect_zha,
     collect_zwave,
 )
+from custom_components.garath_device_health.const import Feature
 from custom_components.garath_device_health.models import DiagnosticState
 
 from .conftest import add_entry
@@ -76,14 +77,17 @@ async def test_zwave_uses_native_statistics_and_exact_unique_ids(hass):
         device_id=device.id,
         translation_key="signal_strength",
     )
-    observed = collect_zwave(hass)
+    observed = collect_zwave(hass, Feature.CONFIGURATION)
     assert len(observed) == 1
     assert observed[0].device_id == device.id
-    assert observed[0].last_seen == now
+    assert observed[0].last_seen is None
     assert len(observed[0].diagnostics) == 3
     assert all(
         item.state == DiagnosticState.DISABLED for item in observed[0].diagnostics
     )
+    communication = collect_zwave(hass, Feature.COMMUNICATION)
+    assert communication[0].last_seen == now
+    assert communication[0].diagnostics == ()
 
 
 async def test_zha_native_timestamp_and_renamed_diagnostics(hass):
@@ -123,17 +127,21 @@ async def test_zha_native_timestamp_and_renamed_diagnostics(hass):
             translation_key=key,
             original_name="A translated display name",
         )
-    observed = collect_zha(hass)
+    observed = collect_zha(hass, Feature.CONFIGURATION)
     assert len(observed) == 1
-    assert observed[0].last_seen == now
+    assert observed[0].last_seen is None
     assert {item.label for item in observed[0].diagnostics} == {"RSSI", "LQI"}
     assert all(
         item.state == DiagnosticState.DISABLED for item in observed[0].diagnostics
     )
+    communication = collect_zha(hass, Feature.COMMUNICATION)
+    assert communication[0].last_seen == now
+    assert communication[0].diagnostics == ()
     dr.async_get(hass).async_update_device(
         device.id, disabled_by=dr.DeviceEntryDisabler.USER
     )
-    assert collect_zha(hass) == []
+    assert collect_zha(hass, Feature.CONFIGURATION) == []
+    assert collect_zha(hass, Feature.COMMUNICATION) == []
 
 
 async def test_missing_zha_diagnostics_do_not_hide_last_seen(hass):
@@ -157,21 +165,100 @@ async def test_missing_zha_diagnostics_do_not_hide_last_seen(hass):
             },
         )
     )
-    observed = collect_zha(hass)[0]
+    observed = collect_zha(hass, Feature.CONFIGURATION)[0]
     assert observed.last_seen is None
     assert all(item.state == DiagnosticState.MISSING for item in observed.diagnostics)
+    assert collect_zha(hass, Feature.COMMUNICATION)[0].last_seen is None
 
 
 async def test_unloaded_sources_and_absent_runtime_are_reported(hass):
     source = add_entry(hass, "zha")
     with pytest.raises(SourceUnavailable, match="runtime"):
-        collect_zha(hass)
+        collect_zha(hass, Feature.COMMUNICATION)
     source._async_set_state(hass, ConfigEntryState.NOT_LOADED, None)
     with pytest.raises(SourceUnavailable, match="not loaded"):
-        collect_zha(hass)
+        collect_zha(hass, Feature.CONFIGURATION)
     zwave = add_entry(hass, "zwave_js")
     zwave.runtime_data = SimpleNamespace(
         client=SimpleNamespace(connected=False, driver=None)
     )
     with pytest.raises(SourceUnavailable, match="disconnected"):
-        collect_zwave(hass)
+        collect_zwave(hass, Feature.COMMUNICATION)
+
+
+async def test_zha_ambiguous_diagnostics_do_not_read_or_block_contact(
+    hass, zha_network
+):
+    source, nodes, devices = zha_network
+    er.async_get(hass).async_get_or_create(
+        "sensor",
+        "zha",
+        "duplicate-rssi",
+        config_entry=source,
+        device_id=devices[1].id,
+        translation_key="rssi",
+    )
+    configured = {
+        item.device_id: item for item in collect_zha(hass, Feature.CONFIGURATION)
+    }
+    assert "Ambiguous" in configured[devices[1].id].error
+    assert configured[devices[2].id].error is None
+    communication = collect_zha(hass, Feature.COMMUNICATION)
+    assert all(item.error is None for item in communication)
+    assert {item.last_seen.timestamp() for item in communication} == {
+        node.last_seen for node in nodes.values()
+    }
+
+
+@pytest.mark.parametrize("invalid_contact", [float("nan"), 1e30])
+async def test_zha_invalid_contact_does_not_read_or_block_diagnostics(
+    hass, zha_network, invalid_contact
+):
+    _, nodes, devices = zha_network
+    nodes[1].last_seen = invalid_contact
+    configured = collect_zha(hass, Feature.CONFIGURATION)
+    assert all(item.error is None for item in configured)
+    assert all(len(item.diagnostics) == 2 for item in configured)
+    communication = {
+        item.device_id: item for item in collect_zha(hass, Feature.COMMUNICATION)
+    }
+    assert communication[devices[1].id].error
+    assert communication[devices[2].id].error is None
+    assert communication[devices[2].id].last_seen.timestamp() == nodes[2].last_seen
+
+
+async def test_zwave_configuration_does_not_require_statistics(hass):
+    source = add_entry(hass, "zwave_js")
+    source.runtime_data = SimpleNamespace(
+        client=SimpleNamespace(
+            connected=True,
+            driver=SimpleNamespace(
+                controller=SimpleNamespace(
+                    home_id=1234,
+                    own_node_id=1,
+                    nodes={7: SimpleNamespace(node_id=7)},
+                )
+            ),
+        )
+    )
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=source.entry_id, identifiers={("zwave_js", "1234-7")}
+    )
+    configured = collect_zwave(hass, Feature.CONFIGURATION)
+    assert configured[0].error is None
+    assert len(configured[0].diagnostics) == 3
+    communication = collect_zwave(hass, Feature.COMMUNICATION)
+    assert "statistics" in communication[0].error
+
+
+async def test_communication_does_not_read_entity_registry_metadata(hass, zha_network):
+    from unittest.mock import patch
+
+    with patch(
+        "custom_components.garath_device_health.adapters.er.async_entries_for_device",
+        side_effect=ValueError("Invalid diagnostics"),
+    ):
+        communication = collect_zha(hass, Feature.COMMUNICATION)
+        assert all(item.error is None for item in communication)
+        configured = collect_zha(hass, Feature.CONFIGURATION)
+        assert all(item.error == "Invalid diagnostics" for item in configured)
