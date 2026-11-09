@@ -1,5 +1,6 @@
-"""Explicit, confirmation-only diagnostic enable flows."""
+"""Explicit, confirmation-only diagnostic and no-contact repair actions."""
 
+from datetime import timedelta
 from typing import Any
 
 import probatio as vol
@@ -12,9 +13,11 @@ from homeassistant.helpers import selector
 from .const import DOMAIN
 from .monitor import DeviceHealthMonitor
 
+_SNOOZE_DAYS = {"snooze_day": 1, "snooze_week": 7, "snooze_30_days": 30}
 
-class EnableDiagnosticsFlow(RepairsFlow):
-    """Enable diagnostics only after confirmation, or exclude the device."""
+
+class DeviceHealthRepairFlow(RepairsFlow):
+    """Enable diagnostics, snooze a stale warning, or exclude the device."""
 
     def __init__(self, issue_id: str) -> None:
         self.issue_id = issue_id
@@ -40,13 +43,25 @@ class EnableDiagnosticsFlow(RepairsFlow):
             return self.async_abort(reason="invalid_issue")
         if device_id in monitor.excluded:
             return self.async_abort(reason="excluded")
+        if issue.translation_key == "stale":
+            actions = [*_SNOOZE_DAYS, "exclude"]
+        elif issue.translation_key == "diagnostics":
+            actions = ["enable", "exclude"]
+        else:
+            return self.async_abort(reason="invalid_issue")
         errors: dict[str, str] = {}
         error_details = ""
         if user_input is not None:
-            if user_input.get("action") == "exclude":
+            action = user_input.get("action")
+            if action not in actions:
+                errors["base"] = "invalid_action"
+            elif action == "exclude":
                 monitor.async_exclude(device_id)
                 return self.async_create_entry(data={})
-            if user_input.get("action") == "enable":
+            elif action in _SNOOZE_DAYS:
+                monitor.async_snooze(device_id, timedelta(days=_SNOOZE_DAYS[action]))
+                return self.async_create_entry(data={})
+            elif action == "enable":
                 try:
                     monitor.async_enable_diagnostics(device_id, protocol)
                 except HomeAssistantError as err:
@@ -54,15 +69,13 @@ class EnableDiagnosticsFlow(RepairsFlow):
                     error_details = str(err)
                 else:
                     return self.async_create_entry(data={})
-            else:
-                errors["base"] = "invalid_action"
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema(
                 {
-                    vol.Required("action", default="enable"): selector.SelectSelector(
+                    vol.Required("action", default=actions[0]): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=["enable", "exclude"],
+                            options=actions,
                             translation_key="repair_action",
                         )
                     )
@@ -81,5 +94,5 @@ async def async_create_fix_flow(
     issue_id: str,
     data: dict[str, str | int | float | None] | None,
 ) -> RepairsFlow:
-    """Create the diagnostic confirmation flow."""
-    return EnableDiagnosticsFlow(issue_id)
+    """Create the confirmation flow for this device repair."""
+    return DeviceHealthRepairFlow(issue_id)

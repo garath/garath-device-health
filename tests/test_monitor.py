@@ -12,7 +12,11 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.garath_device_health import repairs
 from custom_components.garath_device_health.adapters import SourceUnavailable
-from custom_components.garath_device_health.const import CONF_EXCLUDED_DEVICES, DOMAIN
+from custom_components.garath_device_health.const import (
+    CONF_EXCLUDED_DEVICES,
+    CONF_SNOOZED_UNTIL,
+    DOMAIN,
+)
 from custom_components.garath_device_health.models import (
     Diagnostic,
     DiagnosticState,
@@ -333,6 +337,222 @@ async def test_flow_exclude_and_failed_enable_are_explicit(hass, entry):
     result = await manager.async_configure(
         result["flow_id"], user_input={"action": "exclude"}
     )
+    assert result["type"] == "create_entry"
+    assert monitor.excluded == {"device-one"}
+    assert findings(hass) == {}
+
+
+@pytest.mark.parametrize(
+    ("action", "days"),
+    [("snooze_day", 1), ("snooze_week", 7), ("snooze_30_days", 30)],
+)
+async def test_stale_flow_snoozes_only_no_contact_until_exact_expiry(
+    hass, entry, action, days
+):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    now = dt_util.utcnow()
+    disabled = Diagnostic("RSSI", "sensor.rssi", DiagnosticState.DISABLED)
+    observed = observation(diagnostics=(disabled,))
+    manager = RepairsFlowManager(hass)
+    hass.data["repairs"] = {
+        "flow_manager": manager,
+        "platforms": AsyncMock(async_get_platform=AsyncMock(return_value=repairs)),
+    }
+    with (
+        patch.dict(
+            "custom_components.garath_device_health.monitor.COLLECTORS",
+            {"zha": lambda _: [observed]},
+            clear=True,
+        ),
+        patch(
+            "custom_components.garath_device_health.monitor.dt_util.utcnow",
+            return_value=now,
+        ),
+    ):
+        monitor.async_scan()
+        issue = findings(hass)["stale_device-one"]
+        assert issue.is_fixable
+        result = await manager.async_init(
+            DOMAIN, context={"issue_id": "stale_device-one"}
+        )
+        assert result["type"] == "form"
+        manager.async_abort(result["flow_id"])
+        assert monitor.snoozed_until == {}
+        assert "stale_device-one" in findings(hass)
+        result = await manager.async_init(
+            DOMAIN, context={"issue_id": "stale_device-one"}
+        )
+        result = await manager.async_configure(
+            result["flow_id"], user_input={"action": action}
+        )
+        assert result["type"] == "create_entry"
+        assert monitor.excluded == set()
+        expiry = now + timedelta(days=days)
+        assert monitor.snoozed_until == {"device-one": expiry.timestamp()}
+        assert set(findings(hass)) == {"diagnostics_device-one"}
+        monitor.async_scan(expiry - timedelta(microseconds=1))
+        assert set(findings(hass)) == {"diagnostics_device-one"}
+        monitor.async_scan(expiry)
+        assert set(findings(hass)) == {
+            "stale_device-one",
+            "diagnostics_device-one",
+        }
+        assert monitor.snoozed_until == {}
+        assert (
+            findings(hass)["stale_device-one"].translation_placeholders["details"]
+            == observed.last_seen.isoformat()
+        )
+
+
+async def test_snooze_persists_in_config_entry_and_survives_restart(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    monitor.async_snooze("device-one", timedelta(days=7))
+    expiry = monitor.snoozed_until["device-one"]
+    await hass.config_entries._store.async_save(hass.config_entries._data_to_save())
+    saved = await hass.config_entries._store.async_load()
+    saved_entry = next(
+        item for item in saved["entries"] if item["entry_id"] == entry.entry_id
+    )
+    assert saved_entry["options"][CONF_SNOOZED_UNTIL] == {"device-one": expiry}
+    hass.config_entries.async_update_entry(entry, options=saved_entry["options"])
+    restarted = ready_monitor(hass, entry)
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [observation()]},
+        clear=True,
+    ):
+        restarted.async_scan()
+        assert findings(hass) == {}
+        assert restarted.snoozed_until == {"device-one": expiry}
+        restarted.async_scan(dt_util.utc_from_timestamp(expiry))
+        assert set(findings(hass)) == {"stale_device-one"}
+
+
+async def test_snooze_expiry_does_not_warn_after_contact_resumes(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    monitor.async_snooze("device-one", timedelta(days=1))
+    expiry = dt_util.utc_from_timestamp(monitor.snoozed_until["device-one"])
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [observation(last_seen=expiry - timedelta(hours=1))]},
+        clear=True,
+    ):
+        monitor.async_scan(expiry)
+        assert findings(hass) == {}
+        assert monitor.snoozed_until == {}
+
+
+async def test_snooze_does_not_suppress_unknown_contact_or_source_errors(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    monitor.async_snooze("device-one", timedelta(days=1))
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [Observation("device-one", "Device", "zha", None, ())]},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert set(findings(hass)) == {"last_seen_unknown_device-one"}
+
+    def offline(_):
+        raise SourceUnavailable("Disconnected")
+
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": offline},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert "source_unavailable_zha" in findings(hass)
+
+
+async def test_snooze_removes_retained_stale_issue_when_source_is_offline(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [observation()]},
+        clear=True,
+    ):
+        monitor.async_scan()
+    monitor.async_snooze("device-one", timedelta(days=1))
+    # Simulate a stale issue restored from before the snooze was saved.
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        "stale_device-one",
+        is_fixable=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="stale",
+        data={"device_id": "device-one", "protocol": "zha"},
+    )
+
+    def offline(_):
+        raise SourceUnavailable("Disconnected")
+
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": offline},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert set(findings(hass)) == {"source_unavailable_zha"}
+
+
+async def test_snooze_is_per_device_and_keeps_unavailable_diagnostics(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    observed = observation(
+        diagnostics=(Diagnostic("RSSI", None, DiagnosticState.MISSING),)
+    )
+    other_device = Observation(
+        "device-two", "Device Two", "zha", observed.last_seen, ()
+    )
+    monitor.async_snooze("device-one", timedelta(days=1))
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [observed, other_device]},
+        clear=True,
+    ):
+        monitor.async_scan()
+        assert set(findings(hass)) == {
+            "diagnostics_unavailable_device-one",
+            "stale_device-two",
+        }
+
+
+async def test_exclusion_removes_snooze_and_cannot_be_snoozed(hass, entry):
+    from homeassistant.exceptions import HomeAssistantError
+
+    monitor = ready_monitor(hass, entry)
+    monitor.async_snooze("device-one", timedelta(days=1))
+    monitor.async_snooze("device-two", timedelta(days=7))
+    monitor.async_exclude("device-one")
+    assert monitor.excluded == {"device-one"}
+    assert set(monitor.snoozed_until) == {"device-two"}
+    with pytest.raises(HomeAssistantError, match="excluded"):
+        monitor.async_snooze("device-one", timedelta(days=1))
+
+
+async def test_stale_repair_permanent_exclusion_and_invalid_enable(hass, entry):
+    add_entry(hass, "zha")
+    monitor = ready_monitor(hass, entry)
+    with patch.dict(
+        "custom_components.garath_device_health.monitor.COLLECTORS",
+        {"zha": lambda _: [observation()]},
+        clear=True,
+    ):
+        monitor.async_scan()
+    flow = repairs.DeviceHealthRepairFlow("stale_device-one")
+    flow.hass = hass
+    result = await flow.async_step_confirm({"action": "enable"})
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "invalid_action"}
+    assert monitor.snoozed_until == {}
+    result = await flow.async_step_confirm({"action": "exclude"})
     assert result["type"] == "create_entry"
     assert monitor.excluded == {"device-one"}
     assert findings(hass) == {}

@@ -24,9 +24,10 @@ changes, with a five-minute startup grace period. Detection can therefore lag
 the 24-hour boundary by up to one scan interval.
 
 Sleeping battery devices may legitimately be quiet for more than a day.
-"No communication observed" does **not** mean "device failed." Exclude devices
-for which this threshold is inappropriate. RSSI/LQI are diagnostic clues, not
-proof of connectivity, and this project does not warn on signal thresholds.
+"No communication observed" does **not** mean "device failed." Snooze temporary
+warnings, or exclude devices for which this threshold is inappropriate.
+RSSI/LQI are diagnostic clues, not proof of connectivity, and this project does
+not warn on signal thresholds.
 
 Missing/blocked diagnostic entities and unknown last-seen times produce
 informational warning repairs instead of successful-looking enable actions or
@@ -37,18 +38,28 @@ Outstanding device issues are retained until observations can be trusted again.
 
 ## Opt-out behavior
 
+- **Snooze a no-contact repair:** open the repair and choose **24 hours**,
+  **7 days**, or **30 days**. Only the no-contact warning is suppressed;
+  diagnostic checks and unknown-last-seen/source warnings remain active. No last-contact timestamp is
+  changed. At expiry, the next scan warns again only if communication is still
+  overdue, without pinging or waking the device.
+- **Unsnooze early:** open integration options, review the snoozed-until times
+  (in your Home Assistant time zone), and select devices under **Unsnooze
+  devices**. Leave devices unselected to retain their snoozes.
 - **Ignore any device repair:** persistently exclude that device from *both*
   checks and clear all its outstanding repairs.
-- **Exclude in a diagnostic repair flow or integration options:** same result.
+- **Exclude permanently in a repair flow or integration options:** same result;
+  any snooze for that device is removed.
 - **Close/cancel a repair dialog:** no opt-out, and no settings changed.
 - **Re-enable monitoring:** open the integration options and remove the device
   from **Excluded devices**.
 
-Exclusions live in Home Assistant's config entry options and survive restarts
-and Home Assistant upgrades. They use device registry IDs, not user-editable
-names or entity IDs. Removing and pairing a device as a new Home Assistant
-device can give it a new ID, in which case it is included by default again.
-Deleting this integration also deletes its exclusions.
+Exclusions and snooze expiry times live in Home Assistant's config entry options
+and survive restarts and Home Assistant upgrades. They use device registry IDs,
+not user-editable names or entity IDs. Removing and pairing a device as a new
+Home Assistant device can give it a new ID, in which case it is included by
+default again.
+Deleting this integration also deletes its exclusions and snoozes.
 
 ## Installation
 

@@ -14,10 +14,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Device exclusions",
-        "description": "All supported devices are included by default. Selected devices are excluded from BOTH diagnostic and last-seen checks. Ignoring a device repair adds it here. Remove a selection to resume monitoring.",
+        "title": "Device exclusions and snoozes",
+        "description": "All supported devices are included by default. Excluded devices are omitted from BOTH checks. Ignoring a device repair adds it here. Remove an exclusion to resume monitoring.\n\nNo-contact snoozes affect only the 24-hour communication warning. Each snoozed device is listed with its snoozed-until time in your Home Assistant time zone. Select devices under Unsnooze devices to end their snoozes early; leave them unselected to keep snoozing.",
         "data": {
-          "excluded_devices": "Excluded devices"
+          "excluded_devices": "Excluded devices",
+          "unsnooze_devices": "Unsnooze devices"
         }
       }
     }
@@ -26,7 +27,10 @@
     "repair_action": {
       "options": {
         "enable": "Enable the listed diagnostic entities",
-        "exclude": "Exclude this device from all monitoring"
+        "exclude": "Exclude this device permanently from all monitoring",
+        "snooze_day": "Snooze the no-contact warning for 24 hours",
+        "snooze_week": "Snooze the no-contact warning for 7 days",
+        "snooze_30_days": "Snooze the no-contact warning for 30 days"
       }
     }
   },
@@ -66,7 +70,27 @@
     },
     "stale": {
       "title": "No communication observed for {device} in 24 hours",
-      "description": "Last observed communication (UTC): {details}.\n\nCheck power, batteries, range, and the owning integration. Some healthy battery devices communicate less frequently than daily; exclude those devices if this threshold is inappropriate. This repair clears automatically when communication resumes. It does not ping or wake devices. Ignoring this repair excludes this device from BOTH checks. Re-enable monitoring in integration options."
+      "description": "Last observed communication (UTC): {details}.\n\nCheck power, batteries, range, and the owning integration. Some healthy battery devices communicate less frequently than daily. Open this repair to snooze the no-contact warning for 24 hours, 7 days, or 30 days, or permanently exclude the device. Snoozing keeps diagnostic checks active. This repair clears automatically when communication resumes. It does not ping or wake devices. Ignoring this repair excludes this device from BOTH checks. Manage exclusions and snoozes in integration options.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "No-contact warning for {device}",
+            "description": "Last observed communication (UTC): {details}.\n\nSnooze this warning for 24 hours, 7 days, or 30 days without disabling diagnostic checks or changing the last-contact time. Snoozes survive restarts and can be ended early in integration options. When a snooze expires, the next scan warns again only if communication is still overdue.\n\nPermanent exclusion and Home Assistant's Ignore action both disable ALL monitoring checks for this device. Closing this dialog changes nothing.",
+            "data": {
+              "action": "Action"
+            }
+          }
+        },
+        "error": {
+          "invalid_action": "Choose one of the listed actions."
+        },
+        "abort": {
+          "issue_gone": "This issue is no longer active.",
+          "not_loaded": "Garath Device Health is not loaded.",
+          "invalid_issue": "The repair metadata is invalid.",
+          "excluded": "This device is excluded. Include it again in integration options."
+        }
+      }
     },
     "source_unavailable": {
       "title": "Device health monitoring paused for {protocol}",

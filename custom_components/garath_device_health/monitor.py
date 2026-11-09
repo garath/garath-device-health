@@ -1,8 +1,8 @@
-"""Reconcile protocol observations with Repairs and persistent user exclusions."""
+"""Reconcile observations with Repairs, persistent exclusions and snoozes."""
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
@@ -12,8 +12,8 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
 from .adapters import SourceUnavailable, collect_zha, collect_zwave
-from .const import CONF_EXCLUDED_DEVICES, DOMAIN, STARTUP_GRACE
-from .models import DiagnosticState, Observation
+from .const import CONF_EXCLUDED_DEVICES, CONF_SNOOZED_UNTIL, DOMAIN, STARTUP_GRACE
+from .models import DiagnosticState, Observation, issue_id
 from .policy import evaluate
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,16 +37,45 @@ class DeviceHealthMonitor:
         """Return exclusions persisted in the config entry's options."""
         return set(self.entry.options.get(CONF_EXCLUDED_DEVICES, []))
 
+    @property
+    def snoozed_until(self) -> dict[str, float]:
+        """Return persisted UTC expiry timestamps for no-contact warnings."""
+        return dict(self.entry.options.get(CONF_SNOOZED_UNTIL, {}))
+
     @callback
-    def async_exclude(self, device_id: str) -> None:
-        """Persist a device-level opt-out before removing its repair issues."""
-        excluded = self.excluded | {device_id}
+    def async_snooze(self, device_id: str, duration: timedelta) -> None:
+        """Suppress only the stale repair without changing last-contact time."""
+        if device_id in self.excluded:
+            raise HomeAssistantError("This device is excluded from monitoring")
         self.hass.config_entries.async_update_entry(
             self.entry,
             options={
                 **self.entry.options,
-                CONF_EXCLUDED_DEVICES: sorted(excluded),
+                CONF_SNOOZED_UNTIL: {
+                    **self.snoozed_until,
+                    device_id: (dt_util.utcnow() + duration).timestamp(),
+                },
             },
+        )
+        ir.async_delete_issue(self.hass, DOMAIN, issue_id("stale", device_id))
+
+    @callback
+    def async_exclude(self, device_id: str) -> None:
+        """Persist a device-level opt-out before removing its repair issues."""
+        excluded = self.excluded | {device_id}
+        options = {
+            **self.entry.options,
+            CONF_EXCLUDED_DEVICES: sorted(excluded),
+        }
+        if CONF_SNOOZED_UNTIL in options:
+            options[CONF_SNOOZED_UNTIL] = {
+                key: until
+                for key, until in self.snoozed_until.items()
+                if key != device_id
+            }
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            options=options,
         )
         for issue in list(ir.async_get(self.hass).issues.values()):
             if (
@@ -83,6 +112,20 @@ class DeviceHealthMonitor:
                 and isinstance(device_id := issue.data.get("device_id"), str)
             ):
                 self.async_exclude(device_id)
+        snoozed_until = self.snoozed_until
+        active_snoozes = {
+            device_id: until
+            for device_id, until in snoozed_until.items()
+            if until > now.timestamp() and device_id not in self.excluded
+        }
+        if active_snoozes != snoozed_until:
+            self.hass.config_entries.async_update_entry(
+                self.entry,
+                options={
+                    **self.entry.options,
+                    CONF_SNOOZED_UNTIL: active_snoozes,
+                },
+            )
         if now - self.started_at < STARTUP_GRACE:
             return
 
@@ -117,12 +160,14 @@ class DeviceHealthMonitor:
                 continue
             self._errors.pop(protocol, None)
             for finding in evaluate(observations, self.excluded, now):
+                if finding.kind == "stale" and finding.device_id in active_snoozes:
+                    continue
                 wanted.add(finding.issue_id)
                 ir.async_create_issue(
                     self.hass,
                     DOMAIN,
                     finding.issue_id,
-                    is_fixable=finding.kind == "diagnostics",
+                    is_fixable=finding.kind in ("diagnostics", "stale"),
                     is_persistent=True,
                     severity=ir.IssueSeverity.WARNING,
                     translation_key=finding.kind,
@@ -141,7 +186,10 @@ class DeviceHealthMonitor:
             if issue.domain != DOMAIN or issue.issue_id in wanted:
                 continue
             data = issue.data or {}
-            if data.get("device_id") in self.excluded:
+            if data.get("device_id") in self.excluded or (
+                issue.translation_key == "stale"
+                and data.get("device_id") in active_snoozes
+            ):
                 ir.async_delete_issue(self.hass, DOMAIN, issue.issue_id)
             elif data.get("protocol") not in failed:
                 ir.async_delete_issue(self.hass, DOMAIN, issue.issue_id)
@@ -202,7 +250,7 @@ class DeviceHealthMonitor:
 
     @callback
     def async_clear_issues(self) -> None:
-        """Remove this integration's issues on unload, retaining exclusions."""
-        for domain, issue_id in list(ir.async_get(self.hass).issues):
+        """Remove issues on unload, retaining exclusions and snoozes."""
+        for domain, repair_issue_id in list(ir.async_get(self.hass).issues):
             if domain == DOMAIN:
-                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                ir.async_delete_issue(self.hass, DOMAIN, repair_issue_id)

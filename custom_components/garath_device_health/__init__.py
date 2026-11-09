@@ -67,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply exclusions without reloading protocol integrations."""
+    """Apply exclusions and snoozes without reloading protocol integrations."""
     if (monitor := hass.data.get(DOMAIN)) is not None:
         monitor.async_scan()
 
